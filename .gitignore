@@ -4,5 +4,6 @@ __pycache__/
 
 build/
 dist/
+installer/*.exe
 
 .claude/
