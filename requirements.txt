@@ -1,0 +1,7 @@
+customtkinter>=5.2.0
+opencv-python>=4.8.0
+openai-whisper>=20231117
+deep-translator>=1.11.0
+easyocr>=1.7.0
+simple-lama-inpainting>=0.1.2
+elevenlabs>=2.0.0
