@@ -304,83 +304,6 @@ def cv2_save_image(filepath, frame, params=None):
     return False
 
 
-def _build_text_mask(frame_bgr, reader, keywords=None):
-    """Detect text via EasyOCR and return (mask, max_text_height) or (None, 0).
-
-    If `keywords` is a non-empty list of lowercase strings, only text blocks whose
-    detected content contains at least one keyword (substring, case-insensitive)
-    are added to the mask.
-    """
-    results = reader.readtext(frame_bgr)
-    if not results:
-        return None, 0
-
-    h, w = frame_bgr.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    max_text_h = 0
-    matched_any = False
-
-    for bbox, text, _conf in results:
-        if keywords:
-            tl = (text or "").lower()
-            if not any(k in tl for k in keywords):
-                continue
-        matched_any = True
-        pts = np.array(bbox, dtype=np.float32)
-        cx, cy = pts.mean(axis=0)
-        text_h = float(np.linalg.norm(pts[0] - pts[3]))
-        max_text_h = max(max_text_h, text_h)
-
-        pad = max(text_h * 0.25, 4.0)
-        expanded = np.empty_like(pts)
-        for i, (x, y) in enumerate(pts):
-            vx, vy = x - cx, y - cy
-            norm = (vx * vx + vy * vy) ** 0.5 or 1.0
-            expanded[i] = (x + vx / norm * pad, y + vy / norm * pad)
-
-        cv2.fillPoly(mask, [expanded.astype(np.int32)], 255)
-
-    if not matched_any:
-        return None, 0
-
-    k = max(3, int(max_text_h * 0.15) | 1)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    mask = cv2.dilate(mask, kernel, iterations=2)
-    mask = cv2.GaussianBlur(mask, (5, 5), 0)
-    _, mask = cv2.threshold(mask, 10, 255, cv2.THRESH_BINARY)
-    return mask, max_text_h
-
-
-def inpaint_text_on_frame(frame_bgr, reader, lama=None, keywords=None):
-    """Erase text: EasyOCR detects, then inpaint with LaMa (if given) or OpenCV TELEA."""
-    mask, max_text_h = _build_text_mask(frame_bgr, reader, keywords=keywords)
-    if mask is None:
-        return frame_bgr
-
-    if lama is not None:
-        from PIL import Image
-        import torch
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        try:
-            result_pil = lama(Image.fromarray(rgb), Image.fromarray(mask))
-            result_rgb = np.array(result_pil.convert("RGB"))
-            return cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            if getattr(lama, "model", None) is not None and hasattr(lama, "device"):
-                try:
-                    lama.device = torch.device("cpu")
-                    lama.model = lama.model.to("cpu")
-                    result_pil = lama(Image.fromarray(rgb), Image.fromarray(mask))
-                    result_rgb = np.array(result_pil.convert("RGB"))
-                    return cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-                except Exception:
-                    pass
-
-    radius = max(5, int(max_text_h * 0.4))
-    return cv2.inpaint(frame_bgr, mask, radius, cv2.INPAINT_TELEA)
-
-
 def translate_text(text, target_lang, log_fn=None):
     """Translate text using Google Translate. Splits into chunks if too long."""
     if not text.strip():
@@ -441,8 +364,6 @@ class App(ctk.CTk):
         self.do_extract_frames_var = ctk.BooleanVar(value=True)
         self.do_transcript_var = ctk.BooleanVar(value=True)
         self.do_translate_var = ctk.BooleanVar(value=False)
-        self.remove_text_var = ctk.BooleanVar(value=False)
-        self.use_lama_var = ctk.BooleanVar(value=False)
         self.translate_var = ctk.StringVar(value=LANGUAGES["vi"])
 
         # ElevenLabs TTS
@@ -702,53 +623,6 @@ class App(ctk.CTk):
             right, variable=self.translate_var, width=180,
             values=[v for k, v in LANGUAGES.items() if k != "none"],
         ).pack(anchor="w", pady=(4, 0))
-
-        # ── Image processing options ──
-        img_frame = ctk.CTkFrame(self)
-        img_frame.pack(fill="x", padx=20, pady=6)
-
-        img_inner = ctk.CTkFrame(img_frame, fg_color="transparent")
-        img_inner.pack(fill="x", padx=12, pady=10)
-
-        row_a = ctk.CTkFrame(img_inner, fg_color="transparent")
-        row_a.pack(fill="x")
-        ctk.CTkCheckBox(
-            row_a, text="🧹  Xóa tất cả chữ trên ảnh (EasyOCR + inpaint)",
-            variable=self.remove_text_var,
-            font=ctk.CTkFont(size=13),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            row_a,
-            text="(Lần đầu tải model ~100MB)",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-        ).pack(side="left", padx=(12, 0))
-
-        row_b = ctk.CTkFrame(img_inner, fg_color="transparent")
-        row_b.pack(fill="x", pady=(6, 0))
-        ctk.CTkCheckBox(
-            row_b, text="↳ Chất lượng cao (LaMa AI — chậm hơn, đẹp hơn rõ rệt)",
-            variable=self.use_lama_var,
-            font=ctk.CTkFont(size=13),
-        ).pack(side="left", padx=(24, 0))
-        ctk.CTkLabel(
-            row_b,
-            text="(Lần đầu tải model ~200MB)",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-        ).pack(side="left", padx=(12, 0))
-
-        ctk.CTkLabel(
-            img_inner,
-            text="↳ Chỉ xóa các từ/cụm từ này (mỗi dòng 1 từ — để trống = xóa mọi chữ):",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-        ).pack(anchor="w", padx=(24, 0), pady=(8, 2))
-
-        self.remove_keywords_textbox = ctk.CTkTextbox(
-            img_inner, height=70, font=ctk.CTkFont(size=12),
-        )
-        self.remove_keywords_textbox.pack(fill="x", padx=(24, 0))
 
         # ── Buttons ──
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1220,8 +1094,6 @@ class App(ctk.CTk):
             self._log(f"Tìm thấy {total} video trong folder.")
 
             # Load heavy models ONCE for the whole batch
-            ocr_pipeline = None
-            lama_inpainter = None
             whisper_model = None
             tts_client = None
 
@@ -1241,39 +1113,6 @@ class App(ctk.CTk):
                     self._log(f"Không khởi tạo được ElevenLabs: {e}")
                     self.after(0, self._on_complete, False, f"Không khởi tạo được ElevenLabs: {e}")
                     return
-            do_remove_text = do_extract and self.remove_text_var.get()
-            do_use_lama = do_remove_text and self.use_lama_var.get()
-            keywords_raw = self.remove_keywords_textbox.get("1.0", "end") if do_remove_text else ""
-            remove_keywords = [k.strip().lower() for k in keywords_raw.splitlines() if k.strip()]
-
-            if do_remove_text:
-                self._update_progress(0, "Đang tải mô hình EasyOCR...")
-                self._log("Đang tải mô hình EasyOCR (lần đầu có thể tải ~100MB)...")
-                try:
-                    import easyocr
-                    import torch
-                    use_gpu = torch.cuda.is_available()
-                    ocr_pipeline = easyocr.Reader(['en', 'vi'], gpu=use_gpu, verbose=False)
-                    if remove_keywords:
-                        self._log(f"EasyOCR sẵn sàng (GPU: {use_gpu}). Chỉ xóa {len(remove_keywords)} từ khóa: {remove_keywords}")
-                    else:
-                        self._log(f"EasyOCR sẵn sàng (GPU: {use_gpu}). Xóa tất cả chữ phát hiện được.")
-                except Exception as e:
-                    self._log(f"Không tải được EasyOCR: {e}")
-                    self.after(0, self._on_complete, False, f"Không tải được EasyOCR: {e}")
-                    return
-
-                if do_use_lama:
-                    self._update_progress(0, "Đang tải mô hình LaMa...")
-                    self._log("Đang tải mô hình LaMa (lần đầu có thể tải ~200MB)...")
-                    try:
-                        from simple_lama_inpainting import SimpleLama
-                        lama_inpainter = SimpleLama()
-                        self._log("Đã tải LaMa.")
-                    except Exception as e:
-                        self._log(f"Không tải được LaMa: {e} — dùng OpenCV thay thế.")
-                        lama_inpainter = None
-
             if do_transcript:
                 model_name = self.model_var.get()
                 self._update_progress(0, f"Đang tải mô hình Whisper ({model_name})...")
@@ -1323,9 +1162,6 @@ class App(ctk.CTk):
                         do_extract=do_extract,
                         do_transcript=do_transcript,
                         do_translate=do_translate,
-                        ocr_pipeline=ocr_pipeline,
-                        lama_inpainter=lama_inpainter,
-                        remove_keywords=remove_keywords,
                         whisper_model=whisper_model,
                         do_tts=do_tts,
                         tts_client=tts_client,
@@ -1360,7 +1196,6 @@ class App(ctk.CTk):
 
     def _process_single_video(self, video_path, output_dir, interval, translate_lang,
                               do_extract, do_transcript, do_translate,
-                              ocr_pipeline, lama_inpainter, remove_keywords,
                               whisper_model,
                               do_tts, tts_client, tts_voice_id, tts_model, tts_settings,
                               tts_sync, tts_max_tempo,
@@ -1421,18 +1256,11 @@ class App(ctk.CTk):
                 filename = f"frame_{count + 1:05d}_{timestamp_str}.jpg"
                 filepath = os.path.join(output_dir, filename)
 
-                if ocr_pipeline is not None:
-                    try:
-                        frame = inpaint_text_on_frame(frame, ocr_pipeline, lama=lama_inpainter, keywords=remove_keywords)
-                    except Exception as e:
-                        self._log(f"Lỗi xóa chữ ở frame {count + 1}: {e}")
-
                 cv2_save_image(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
                 count += 1
                 local_prog = (count / total_extractions) * w_frame
-                status_prefix = "Đang xóa chữ + lưu ảnh" if ocr_pipeline is not None else "Đang trích xuất ảnh"
-                progress_cb(min(local_prog, w_frame), f"{status_prefix}... ({count}/{total_extractions})")
+                progress_cb(min(local_prog, w_frame), f"Đang trích xuất ảnh... ({count}/{total_extractions})")
 
                 frame_index += frame_interval
 

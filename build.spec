@@ -14,11 +14,6 @@ FFMPEG_PATH = os.path.join(os.environ['LOCALAPPDATA'], 'Microsoft', 'WinGet', 'P
 FFPROBE_PATH = os.path.join(os.environ['LOCALAPPDATA'], 'Microsoft', 'WinGet', 'Packages',
     'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe', 'ffmpeg-8.1-full_build', 'bin', 'ffprobe.exe')
 
-# EasyOCR + LaMa need data files and hidden submodules
-easyocr_datas = collect_data_files('easyocr')
-easyocr_hidden = collect_submodules('easyocr')
-lama_datas = collect_data_files('simple_lama_inpainting')
-lama_hidden = collect_submodules('simple_lama_inpainting')
 elevenlabs_hidden = collect_submodules('elevenlabs')
 
 a = Analysis(
@@ -31,13 +26,12 @@ a = Analysis(
     datas=[
         (CTK_PATH, 'customtkinter'),
         (os.path.join(WHISPER_PATH, 'assets'), os.path.join('whisper', 'assets')),
-    ] + easyocr_datas + lama_datas,
+    ],
     hiddenimports=[
         'tiktoken',
         'tiktoken_ext',
         'tiktoken_ext.openai_public',
         'torch',
-        'torchvision',
         'numpy',
         'whisper',
         'whisper.model',
@@ -47,13 +41,7 @@ a = Analysis(
         'whisper.tokenizer',
         'deep_translator',
         'deep_translator.google',
-        'easyocr',
-        'skimage',
-        'scipy',
-        'shapely',
-        'pyclipper',
         'PIL',
-        'simple_lama_inpainting',
         'elevenlabs',
         'httpx',
         'httpcore',
@@ -62,7 +50,7 @@ a = Analysis(
         'pydantic',
         'pydantic_core',
         'websockets',
-    ] + easyocr_hidden + lama_hidden + elevenlabs_hidden,
+    ] + elevenlabs_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
