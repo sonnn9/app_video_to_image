@@ -304,6 +304,81 @@ def cv2_save_image(filepath, frame, params=None):
     return False
 
 
+def pick_representative_frames(frames_dir, n=5):
+    """Return up to n frame paths evenly spaced from a frames folder."""
+    frames = sorted(Path(frames_dir).glob("frame_*.jpg"))
+    if not frames:
+        return []
+    if len(frames) <= n:
+        return [str(p) for p in frames]
+    step = (len(frames) - 1) / (n - 1)
+    indices = [round(i * step) for i in range(n)]
+    return [str(frames[i]) for i in indices]
+
+
+def rewrite_transcript_viral(vi_transcript, frame_paths, product_info,
+                             log_fn=None, timeout=600):
+    """Use Codex CLI (codex exec -i ...) to rewrite VN transcript as viral sales script.
+
+    Returns the rewritten script as a plain string. Raises RuntimeError on failure.
+    """
+    codex_exe = shutil.which("codex") or shutil.which("codex.cmd")
+    if not codex_exe:
+        raise RuntimeError("Không tìm thấy lệnh 'codex' trong PATH. Cài Codex CLI rồi thử lại.")
+
+    info = (product_info or "").strip() or "(không có thông tin bổ sung)"
+
+    prompt = f"""Bạn là chuyên gia copywriter viral cho TikTok/Reels/Shorts.
+
+Dưới đây là transcript tiếng Việt của một video sản phẩm và các ảnh chụp sản phẩm trích từ chính video đó.
+
+THÔNG TIN SẢN PHẨM (do người dùng cung cấp):
+{info}
+
+TRANSCRIPT GỐC (TIẾNG VIỆT):
+{vi_transcript.strip()}
+
+YÊU CẦU:
+1. Viết lại thành KỊCH BẢN VIRAL khoảng 60-90 giây cho TikTok / Reels / Shorts.
+2. 3-5 giây ĐẦU phải có HOOK CỰC MẠNH: câu hỏi gây tò mò, con số shock, hoặc vấn đề đau đầu của khách hàng.
+3. Highlight 2-3 USP của sản phẩm dựa trên những gì BẠN THẤY trong ảnh (màu sắc, thiết kế, công dụng, chi tiết nổi bật...).
+4. Văn phong nói chuyện tự nhiên kiểu người Việt trẻ. Tránh từ Hán-Việt nặng nề và lối viết sáo rỗng.
+5. CTA cuối rõ ràng: "comment", "follow", "click link bio", "mua ngay"...
+6. CHỈ in ra phần script thuần text — KHÔNG thêm lời giải thích, tiêu đề, markdown hay liệt kê đánh số.
+7. Output sẵn sàng để đọc trực tiếp bằng TTS."""
+
+    cmd = [codex_exe, "exec"]
+    for fp in frame_paths:
+        cmd.extend(["-i", fp])
+    cmd.append(prompt)
+
+    if log_fn:
+        log_fn(f"Gọi Codex CLI với {len(frame_paths)} ảnh tham chiếu...")
+
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        startupinfo=startupinfo,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Codex CLI thất bại (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout)[:500]}"
+        )
+
+    return result.stdout.strip()
+
+
 def translate_text(text, target_lang, log_fn=None):
     """Translate text using Google Translate. Splits into chunks if too long."""
     if not text.strip():
@@ -365,6 +440,7 @@ class App(ctk.CTk):
         self.do_transcript_var = ctk.BooleanVar(value=True)
         self.do_translate_var = ctk.BooleanVar(value=False)
         self.translate_var = ctk.StringVar(value=LANGUAGES["vi"])
+        self.do_viral_rewrite_var = ctk.BooleanVar(value=False)
 
         # ElevenLabs TTS
         self.do_tts_var = ctk.BooleanVar(value=False)
@@ -479,6 +555,10 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(0, 16))
         ctk.CTkCheckBox(
             opts_inner, text="🌐  Dịch phiên âm", variable=self.do_translate_var,
+            font=ctk.CTkFont(size=13),
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkCheckBox(
+            opts_inner, text="🔥  Viết lại viral (Codex)", variable=self.do_viral_rewrite_var,
             font=ctk.CTkFont(size=13),
         ).pack(side="left", padx=(0, 16))
         ctk.CTkCheckBox(
@@ -623,6 +703,27 @@ class App(ctk.CTk):
             right, variable=self.translate_var, width=180,
             values=[v for k, v in LANGUAGES.items() if k != "none"],
         ).pack(anchor="w", pady=(4, 0))
+
+        # ── Viral rewrite — product info ──
+        viral_frame = ctk.CTkFrame(self)
+        viral_frame.pack(fill="x", padx=20, pady=6)
+
+        ctk.CTkLabel(
+            viral_frame,
+            text="🔥  Thông tin sản phẩm cho viết viral (chỉ dùng khi tick \"Viết lại viral\"):",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            viral_frame,
+            text="Ví dụ: tên SP, giá, USP, mã giảm giá, link bio... — để trống Codex sẽ chỉ dựa vào ảnh + transcript.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        ).pack(anchor="w", padx=12, pady=(0, 4))
+
+        self.viral_product_info_textbox = ctk.CTkTextbox(
+            viral_frame, height=70, font=ctk.CTkFont(size=12),
+        )
+        self.viral_product_info_textbox.pack(fill="x", padx=12, pady=(0, 10))
 
         # ── Buttons ──
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -943,6 +1044,7 @@ class App(ctk.CTk):
         do_extract = self.do_extract_frames_var.get()
         do_transcript = self.do_transcript_var.get()
         do_translate = self.do_translate_var.get()
+        do_viral_rewrite = self.do_viral_rewrite_var.get()
         do_tts = self.do_tts_var.get()
 
         if not (do_extract or do_transcript):
@@ -958,6 +1060,31 @@ class App(ctk.CTk):
                 "Muốn đọc transcript thì phải tick 'Trích xuất phiên âm' trước.",
             )
             return
+
+        if do_viral_rewrite:
+            if not (do_translate and do_transcript):
+                messagebox.showerror(
+                    "Lỗi",
+                    "Viết lại viral cần bật 'Trích xuất phiên âm' + 'Dịch phiên âm' (sang tiếng Việt).",
+                )
+                return
+            if not do_extract:
+                messagebox.showerror(
+                    "Lỗi",
+                    "Viết lại viral cần ảnh sản phẩm — hãy tick 'Tách video thành ảnh'.",
+                )
+                return
+            if not (shutil.which("codex") or shutil.which("codex.cmd")):
+                messagebox.showerror(
+                    "Lỗi",
+                    "Không tìm thấy lệnh 'codex' trong PATH. Cài Codex CLI rồi thử lại.",
+                )
+                return
+
+        viral_product_info = (
+            self.viral_product_info_textbox.get("1.0", "end").strip()
+            if do_viral_rewrite else ""
+        )
 
         do_merge_video = self.do_merge_video_var.get()
         if do_merge_video and not do_tts:
@@ -1044,6 +1171,13 @@ class App(ctk.CTk):
                 messagebox.showerror("Lỗi", "Vui lòng chọn ngôn ngữ để dịch.")
                 return
 
+        if do_viral_rewrite and translate_lang != "vi":
+            messagebox.showerror(
+                "Lỗi",
+                "Viết lại viral hiện chỉ hỗ trợ tiếng Việt. Hãy chọn 'Tiếng Việt' ở mục 'Dịch sang'.",
+            )
+            return
+
         self._processing = True
         self._cancel_flag.clear()
         self.start_btn.configure(state="disabled")
@@ -1061,6 +1195,7 @@ class App(ctk.CTk):
             target=self._batch_worker,
             args=(videos, videos_dir, output_root, interval, translate_lang,
                   do_extract, do_transcript, do_translate,
+                  do_viral_rewrite, viral_product_info,
                   do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                   tts_sync, tts_max_tempo, do_merge_video),
             daemon=True,
@@ -1086,6 +1221,7 @@ class App(ctk.CTk):
 
     def _batch_worker(self, videos, videos_dir, output_root, interval, translate_lang,
                       do_extract, do_transcript, do_translate,
+                      do_viral_rewrite, viral_product_info,
                       do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                       tts_sync, tts_max_tempo, do_merge_video):
         """Process every video in the folder sequentially."""
@@ -1162,6 +1298,8 @@ class App(ctk.CTk):
                         do_extract=do_extract,
                         do_transcript=do_transcript,
                         do_translate=do_translate,
+                        do_viral_rewrite=do_viral_rewrite,
+                        viral_product_info=viral_product_info,
                         whisper_model=whisper_model,
                         do_tts=do_tts,
                         tts_client=tts_client,
@@ -1196,6 +1334,7 @@ class App(ctk.CTk):
 
     def _process_single_video(self, video_path, output_dir, interval, translate_lang,
                               do_extract, do_transcript, do_translate,
+                              do_viral_rewrite, viral_product_info,
                               whisper_model,
                               do_tts, tts_client, tts_voice_id, tts_model, tts_settings,
                               tts_sync, tts_max_tempo,
@@ -1318,6 +1457,8 @@ class App(ctk.CTk):
             self._log("Đã lưu phiên âm: transcript.txt")
             progress_cb(w_frame + w_transcript, "Phiên âm xong!")
 
+        translated_full = None
+        translated_segments = []
         tts_source_text = full_text
         tts_source_label = "gốc"
         tts_source_segments = segments  # default; switched to translated_segments if translation runs
@@ -1371,6 +1512,35 @@ class App(ctk.CTk):
             tts_source_text = translated_full
             tts_source_label = f"dịch ({lang_name})"
             tts_source_segments = translated_segments
+
+        # ── Phase 3.5: Viral rewrite via Codex CLI (sau dịch sang tiếng Việt) ──
+        if do_viral_rewrite and do_translate and translate_lang == "vi" and translated_full:
+            if self._cancel_flag.is_set():
+                raise RuntimeError("Đã hủy bởi người dùng.")
+
+            self._log("Đang chọn ảnh tham chiếu cho Codex...")
+            frame_paths = pick_representative_frames(output_dir, n=5)
+            if not frame_paths:
+                self._log("⚠ Không tìm thấy ảnh frame để gửi Codex — bỏ qua viết lại viral.")
+            else:
+                self._log(f"Đã chọn {len(frame_paths)} ảnh: {[Path(p).name for p in frame_paths]}")
+                progress_cb(w_frame + w_transcript + w_translate, "Đang viết lại viral bằng Codex CLI...")
+                try:
+                    viral_script = rewrite_transcript_viral(
+                        vi_transcript=translated_full,
+                        frame_paths=frame_paths,
+                        product_info=viral_product_info,
+                        log_fn=self._log,
+                    )
+                    viral_path = os.path.join(output_dir, "transcript_viral.txt")
+                    with open(viral_path, "w", encoding="utf-8") as f:
+                        f.write(viral_script + "\n")
+                    self._log(f"Đã lưu bản viral: transcript_viral.txt ({len(viral_script)} ký tự)")
+                    tts_source_text = viral_script
+                    tts_source_label = "viral (Codex)"
+                    tts_source_segments = []  # viral script không có timestamp gốc
+                except Exception as e:
+                    self._log(f"✖ Lỗi viết lại viral: {e} — giữ nguyên bản dịch cho TTS.")
 
         # ── Phase 4: TTS via ElevenLabs ──
         if do_tts and do_transcript and tts_client is not None:
