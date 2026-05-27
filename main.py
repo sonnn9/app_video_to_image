@@ -306,7 +306,12 @@ def cv2_save_image(filepath, frame, params=None):
 
 def pick_representative_frames(frames_dir, n=5):
     """Return up to n frame paths evenly spaced from a frames folder."""
-    frames = sorted(Path(frames_dir).glob("frame_*.jpg"))
+    def _frame_key(p):
+        try:
+            return (0, int(p.stem))
+        except ValueError:
+            return (1, p.name)
+    frames = sorted(Path(frames_dir).glob("*.jpg"), key=_frame_key)
     if not frames:
         return []
     if len(frames) <= n:
@@ -404,9 +409,29 @@ SCENE_OUTPUT_FILES = [
     "production_notes.txt",
 ]
 
+CHARACTER_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def character_name_from_filename(path):
+    """father.png -> 'Father', ong_noi.png -> 'Ong Noi'."""
+    stem = Path(path).stem
+    cleaned = re.sub(r"[_\-]+", " ", stem).strip()
+    return cleaned.title() if cleaned else stem
+
+
+def collect_character_refs(folder):
+    """Return sorted list of (filename, character_name, abs_path) for images in folder."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    refs = []
+    for p in sorted(Path(folder).iterdir(), key=lambda x: x.name.lower()):
+        if p.is_file() and p.suffix.lower() in CHARACTER_IMAGE_EXTS:
+            refs.append((p.name, character_name_from_filename(p), str(p)))
+    return refs
+
 
 def generate_scene_prompts(viral_script, frame_paths, product_info,
-                           log_fn=None, timeout=1200):
+                           character_refs=None, log_fn=None, timeout=1200):
     """Use Codex CLI to produce a full scene breakdown + image/video prompts.
 
     Output is one big string with `===FILE: <name>===` markers separating each
@@ -419,9 +444,43 @@ def generate_scene_prompts(viral_script, frame_paths, product_info,
     info = (product_info or "").strip() or "(không có thông tin bổ sung)"
     files_list = ", ".join(SCENE_OUTPUT_FILES)
 
+    character_refs = character_refs or []
+    n_keyframes = len(frame_paths)
+    n_characters = len(character_refs)
+
+    if character_refs:
+        char_lines = []
+        for fname, cname, _ in character_refs:
+            char_lines.append(f"  • {fname}  →  nhân vật \"{cname}\"")
+        characters_block = (
+            "DANH SÁCH NHÂN VẬT CỐ ĐỊNH (BẮT BUỘC BÁM SÁT):\n"
+            + "\n".join(char_lines)
+            + "\n\n"
+            f"QUAN TRỌNG: Tổng số ảnh đính kèm là {n_characters + n_keyframes}. "
+            f"{n_characters} ảnh ĐẦU là ảnh nhân vật (theo thứ tự trên), "
+            f"{n_keyframes} ảnh SAU là keyframe trích từ video gốc.\n"
+        )
+        characters_image_rule = (
+            "BẮT BUỘC: Mỗi prompt ảnh PHẢI có dòng tham chiếu file nhân vật, vd:\n"
+            "  Use the uploaded character reference images: father.png as Father, "
+            "mother.png as Mother. Keep their faces, hairstyles and outfits EXACTLY "
+            "consistent with these references across every scene.\n"
+            "Liệt kê đúng các file nhân vật xuất hiện trong cảnh đó."
+        )
+        characters_video_rule = (
+            "Trong từng Grok/Veo3 prompt cũng phải nhắc lại file nhân vật xuất hiện trong cảnh "
+            "(vd: \"Characters must match father.png and mother.png exactly — no face, hair, or outfit drift\")."
+        )
+    else:
+        characters_block = "DANH SÁCH NHÂN VẬT CỐ ĐỊNH: (không có — tự suy từ keyframe / kịch bản)\n"
+        characters_image_rule = "(không có ảnh nhân vật cố định — chỉ mô tả bằng text)"
+        characters_video_rule = "(không có ảnh nhân vật cố định)"
+
     prompt = f"""Bạn là trợ lý sản xuất video dài bằng AI, chuyên phân tích kịch bản, chia cảnh, tạo prompt ảnh ChatGPT Image và tạo prompt video Grok + Veo 3 từ các ảnh keyframe.
 
-Bạn nhận: (a) một kịch bản viral tiếng Việt, (b) các ảnh keyframe trích từ video sản phẩm gốc đính kèm, (c) thông tin sản phẩm.
+Bạn nhận: (a) một kịch bản viral tiếng Việt, (b) các ảnh nhân vật cố định (nếu có) + các ảnh keyframe trích từ video sản phẩm gốc đính kèm, (c) thông tin sản phẩm.
+
+{characters_block}
 
 NGUYÊN TẮC CHIA CẢNH:
 - KHÔNG chia số cố định. Phân tích nhịp kể chuyện, lời thoại, sự thay đổi của hành động/bối cảnh/cảm xúc.
@@ -441,8 +500,9 @@ NỘI DUNG TỪNG FILE
 ═══════════════════════════════════════════════
 
 [character_bible.txt]
-Với mỗi nhân vật (nếu có): Tên | Tuổi | Giới tính | Ngoại hình | Kiểu tóc | Trang phục | Tính cách | Biểu cảm điển hình | Quy tắc giữ đồng nhất xuyên suốt video.
-Nếu video không có nhân vật người (chỉ sản phẩm), ghi rõ "Không có nhân vật người" và mô tả "nhân vật chính" là sản phẩm.
+NẾU có danh sách nhân vật cố định ở trên: PHẢI dùng đúng tên đó và mô tả theo đúng ngoại hình thấy trong ảnh nhân vật (KHÔNG bịa khác). Mỗi nhân vật có dòng đầu: `Tên (file_nhân_vật.ext)` rồi mới đến mô tả.
+Với mỗi nhân vật: Tên (file) | Tuổi | Giới tính | Ngoại hình | Kiểu tóc | Trang phục | Tính cách | Biểu cảm điển hình | Quy tắc giữ đồng nhất xuyên suốt video.
+Nếu video không có nhân vật người (chỉ sản phẩm) VÀ không có file nhân vật, ghi rõ "Không có nhân vật người" và mô tả "nhân vật chính" là sản phẩm.
 
 [visual_bible.txt]
 Phong cách hình ảnh | Tỷ lệ khung (9:16 / 16:9 / 1:1) | Tông màu | Ánh sáng | Bối cảnh chính | Camera style | Mức realistic/cartoon/3D/cinematic | Những điều TUYỆT ĐỐI không thay đổi xuyên video.
@@ -473,12 +533,15 @@ Cảnh <số>:
 - Ghi chú chuyển cảnh: <...>
 
 [all_image_prompts.txt]
+{characters_image_rule}
+
 Mỗi cảnh = 1 prompt. Theo đúng cấu trúc:
 
 Image Prompt 01:
 Create a [style] [aspect ratio] keyframe image for a long-form AI video.
+Character references (uploaded by user): [liệt kê đúng các file nhân vật xuất hiện cảnh này, vd: father.png as Father, mother.png as Mother — hoặc "none" nếu chỉ sản phẩm]
 Keep the same characters throughout the entire series:
-[short character description theo Character Bible]
+[short character description theo Character Bible — bám sát ảnh ref nếu có]
 Scene 01:
 [describe the scene clearly]
 Show [main action, emotion, composition].
@@ -488,6 +551,8 @@ No text, no subtitles, no letters, no watermark, no logo.
 (Lặp lại cho từng cảnh, đánh số 01, 02, 03...)
 
 [all_grok_video_prompts.txt]
+{characters_video_rule}
+
 Nếu có N ảnh, tạo N-1 prompt (mỗi cặp ảnh liên tiếp). Cộng thêm Outro Prompt nếu cần.
 
 Grok Video Prompt 01 — Image 01 to Image 02:
@@ -495,8 +560,9 @@ Grok Video Prompt 01 — Image 01 to Image 02:
 Use the uploaded Image 01 as the exact starting frame and Image 02 as the exact ending frame.
 Create a smooth [duration]-second video transition from Image 01 to Image 02.
 
+Character references (must match exactly): [liệt kê đúng các file nhân vật trong cảnh, vd: father.png, mother.png — hoặc "none"]
 Preserve the same characters exactly:
-[character consistency rules]
+[character consistency rules — không thay đổi mặt, tóc, trang phục]
 
 At 0-1s:
 [describe starting action]
@@ -528,7 +594,8 @@ Veo 3 Video Prompt 01 — Scene 01 to Scene 02:
 Duration: 8 seconds
 Starting frame: Image 01 (exact composition)
 Ending frame: Image 02 (exact composition)
-Subject: [character/product description, giữ đồng nhất]
+Character references: [liệt kê đúng file nhân vật xuất hiện trong cảnh, vd: father.png, mother.png — hoặc "none"]
+Subject: [character/product description, giữ đồng nhất theo ảnh ref]
 Action timeline:
 - 0-2s: [opening motion]
 - 2-6s: [main movement]
@@ -558,12 +625,18 @@ KỊCH BẢN VIRAL TIẾNG VIỆT:
 Bắt đầu output ngay (block đầu tiên `===FILE: character_bible.txt===`). KHÔNG thêm lời mở đầu."""
 
     cmd = [codex_exe, "exec"]
+    # Ảnh nhân vật trước (để Codex bám), keyframe sau
+    for _, _, fp in character_refs:
+        cmd.extend(["-i", fp])
     for fp in frame_paths:
         cmd.extend(["-i", fp])
     # Prompt qua stdin để tránh `-i <FILE>...` variadic nuốt mất prompt.
 
     if log_fn:
-        log_fn(f"Gọi Codex CLI cho scene breakdown ({len(frame_paths)} ảnh, có thể mất 3-10 phút)...")
+        log_fn(
+            f"Gọi Codex CLI cho scene breakdown "
+            f"({n_characters} ảnh nhân vật + {n_keyframes} keyframe, có thể mất 3-10 phút)..."
+        )
 
     startupinfo = None
     if os.name == "nt":
@@ -672,6 +745,7 @@ class App(ctk.CTk):
         # Variables
         self.videos_dir_var = ctk.StringVar()
         self.output_dir_var = ctk.StringVar()
+        self.character_dir_var = ctk.StringVar(value=self._config.get("character_ref_dir", ""))
         self.interval_var = ctk.StringVar(value="5")
         self.model_var = ctk.StringVar(value="base")
         self.do_extract_frames_var = ctk.BooleanVar(value=True)
@@ -770,6 +844,21 @@ class App(ctk.CTk):
         ctk.CTkEntry(row2, textvariable=self.output_dir_var, state="readonly").pack(side="left", fill="x", expand=True)
         ctk.CTkButton(row2, text="Duyệt...", width=90, command=self._browse_output).pack(side="right", padx=(8, 0))
         ctk.CTkButton(row2, text="Xóa", width=60, command=lambda: self.output_dir_var.set("")).pack(side="right", padx=(8, 0))
+
+        # ── Character reference folder (for scene prompts) ──
+        char_frame = ctk.CTkFrame(self)
+        char_frame.pack(fill="x", padx=20, pady=6)
+
+        ctk.CTkLabel(
+            char_frame,
+            text="👥  Folder ảnh nhân vật (cho scene prompts — vd: father.png, mother.png):",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        row_char = ctk.CTkFrame(char_frame, fg_color="transparent")
+        row_char.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkEntry(row_char, textvariable=self.character_dir_var, state="readonly").pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row_char, text="Duyệt...", width=90, command=self._browse_character_dir).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(row_char, text="Xóa", width=60, command=lambda: self.character_dir_var.set("")).pack(side="right", padx=(8, 0))
 
         # ── Main options (checkboxes) ──
         opts_frame = ctk.CTkFrame(self)
@@ -1236,6 +1325,11 @@ class App(ctk.CTk):
         if path:
             self.output_dir_var.set(path)
 
+    def _browse_character_dir(self):
+        path = filedialog.askdirectory(title="Chọn folder ảnh nhân vật tham chiếu")
+        if path:
+            self.character_dir_var.set(path)
+
     # ── Logging ──
     def _log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1330,11 +1424,33 @@ class App(ctk.CTk):
             if (do_viral_rewrite or do_scene_prompts) else ""
         )
 
-        if do_scene_prompts:
-            if not do_viral_rewrite:
+        character_dir = self.character_dir_var.get().strip()
+        character_refs = []
+        if do_scene_prompts and character_dir:
+            if not os.path.isdir(character_dir):
+                messagebox.showerror("Lỗi", f"Folder ảnh nhân vật không tồn tại:\n{character_dir}")
+                return
+            character_refs = collect_character_refs(character_dir)
+            if not character_refs:
                 messagebox.showerror(
                     "Lỗi",
-                    "Tạo scene prompts cần bật 'Viết lại viral (Codex)' trước để có kịch bản nguồn.",
+                    "Folder ảnh nhân vật không có file ảnh hợp lệ (jpg/png/webp/bmp).",
+                )
+                return
+            self._config["character_ref_dir"] = character_dir
+            save_config(self._config)
+
+        if do_scene_prompts:
+            if not do_viral_rewrite and not do_transcript:
+                messagebox.showerror(
+                    "Lỗi",
+                    "Tạo scene prompts cần có kịch bản nguồn — hãy bật 'Viết lại viral (Codex)' hoặc 'Trích xuất phiên âm'.",
+                )
+                return
+            if not do_extract:
+                messagebox.showerror(
+                    "Lỗi",
+                    "Tạo scene prompts cần ảnh tham chiếu — hãy tick 'Tách video thành ảnh'.",
                 )
                 return
             if not (shutil.which("codex") or shutil.which("codex.cmd")):
@@ -1453,7 +1569,7 @@ class App(ctk.CTk):
             target=self._batch_worker,
             args=(videos, videos_dir, output_root, interval, translate_lang,
                   do_extract, do_transcript, do_translate,
-                  do_viral_rewrite, viral_product_info, do_scene_prompts,
+                  do_viral_rewrite, viral_product_info, do_scene_prompts, character_refs,
                   do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                   tts_sync, tts_max_tempo, do_merge_video),
             daemon=True,
@@ -1479,7 +1595,7 @@ class App(ctk.CTk):
 
     def _batch_worker(self, videos, videos_dir, output_root, interval, translate_lang,
                       do_extract, do_transcript, do_translate,
-                      do_viral_rewrite, viral_product_info, do_scene_prompts,
+                      do_viral_rewrite, viral_product_info, do_scene_prompts, character_refs,
                       do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                       tts_sync, tts_max_tempo, do_merge_video):
         """Process every video in the folder sequentially."""
@@ -1559,6 +1675,7 @@ class App(ctk.CTk):
                         do_viral_rewrite=do_viral_rewrite,
                         viral_product_info=viral_product_info,
                         do_scene_prompts=do_scene_prompts,
+                        character_refs=character_refs,
                         whisper_model=whisper_model,
                         do_tts=do_tts,
                         tts_client=tts_client,
@@ -1594,6 +1711,7 @@ class App(ctk.CTk):
     def _process_single_video(self, video_path, output_dir, interval, translate_lang,
                               do_extract, do_transcript, do_translate,
                               do_viral_rewrite, viral_product_info, do_scene_prompts,
+                              character_refs,
                               whisper_model,
                               do_tts, tts_client, tts_voice_id, tts_model, tts_settings,
                               tts_sync, tts_max_tempo,
@@ -1645,13 +1763,7 @@ class App(ctk.CTk):
                 if not ret:
                     break
 
-                seconds = frame_index / fps
-                h = int(seconds // 3600)
-                m = int((seconds % 3600) // 60)
-                s = int(seconds % 60)
-                timestamp_str = f"{h:02d}h{m:02d}m{s:02d}s"
-
-                filename = f"frame_{count + 1:05d}_{timestamp_str}.jpg"
+                filename = f"{count + 1}.jpg"
                 filepath = os.path.join(output_dir, filename)
 
                 cv2_save_image(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -1809,35 +1921,58 @@ class App(ctk.CTk):
                     viral_script = None
 
         # ── Phase 3.7: Scene breakdown + image/video prompts via Codex CLI ──
-        if do_scene_prompts and viral_script:
-            if self._cancel_flag.is_set():
-                raise RuntimeError("Đã hủy bởi người dùng.")
-
-            n_frames = calc_reference_frame_count(len(viral_script))
-            self._log(f"Đang chọn {n_frames} ảnh tham chiếu cho scene breakdown...")
-            scene_frames = pick_representative_frames(output_dir, n=n_frames)
-            if not scene_frames:
-                self._log("⚠ Không có ảnh để tạo scene prompts — bỏ qua.")
+        # Ưu tiên viral script; nếu không có thì dùng transcript (dịch nếu có, không thì gốc).
+        if do_scene_prompts:
+            if viral_script:
+                scene_source_text = viral_script
+                scene_source_label = "viral (Codex)"
+            elif translated_full:
+                scene_source_text = translated_full
+                scene_source_label = "bản dịch"
+            elif full_text:
+                scene_source_text = full_text
+                scene_source_label = "transcript gốc"
             else:
-                self._log(f"Đã chọn {len(scene_frames)} ảnh: {[Path(p).name for p in scene_frames]}")
-                progress_cb(w_frame + w_transcript + w_translate, "Đang tạo scene prompts bằng Codex (3-10 phút)...")
-                try:
-                    raw = generate_scene_prompts(
-                        viral_script=viral_script,
-                        frame_paths=scene_frames,
-                        product_info=viral_product_info,
-                        log_fn=self._log,
-                    )
-                    scenes_dir = os.path.join(output_dir, "scene_prompts")
-                    written = split_scene_output(raw, scenes_dir)
-                    if written:
-                        self._log(f"Đã lưu {len(written)} file scene prompts vào: scene_prompts/")
-                        for p in written:
-                            self._log(f"  • {Path(p).name}")
-                    else:
-                        self._log("⚠ Codex output không có marker `===FILE: ...===` — chỉ lưu _raw_codex_output.txt.")
-                except Exception as e:
-                    self._log(f"✖ Lỗi tạo scene prompts: {e}")
+                scene_source_text = ""
+                scene_source_label = ""
+
+            if not scene_source_text:
+                self._log("⚠ Không có kịch bản nguồn cho scene prompts — bỏ qua.")
+            else:
+                if self._cancel_flag.is_set():
+                    raise RuntimeError("Đã hủy bởi người dùng.")
+
+                n_frames = calc_reference_frame_count(len(scene_source_text))
+                self._log(f"Đang chọn {n_frames} ảnh tham chiếu cho scene breakdown (nguồn: {scene_source_label})...")
+                scene_frames = pick_representative_frames(output_dir, n=n_frames)
+                if not scene_frames:
+                    self._log("⚠ Không có ảnh để tạo scene prompts — bỏ qua.")
+                else:
+                    self._log(f"Đã chọn {len(scene_frames)} ảnh: {[Path(p).name for p in scene_frames]}")
+                    progress_cb(w_frame + w_transcript + w_translate, "Đang tạo scene prompts bằng Codex (3-10 phút)...")
+                    try:
+                        if character_refs:
+                            self._log(
+                                f"Dùng {len(character_refs)} ảnh nhân vật: "
+                                + ", ".join(c[0] for c in character_refs)
+                            )
+                        raw = generate_scene_prompts(
+                            viral_script=scene_source_text,
+                            frame_paths=scene_frames,
+                            product_info=viral_product_info,
+                            character_refs=character_refs,
+                            log_fn=self._log,
+                        )
+                        scenes_dir = os.path.join(output_dir, "scene_prompts")
+                        written = split_scene_output(raw, scenes_dir)
+                        if written:
+                            self._log(f"Đã lưu {len(written)} file scene prompts vào: scene_prompts/")
+                            for p in written:
+                                self._log(f"  • {Path(p).name}")
+                        else:
+                            self._log("⚠ Codex output không có marker `===FILE: ...===` — chỉ lưu _raw_codex_output.txt.")
+                    except Exception as e:
+                        self._log(f"✖ Lỗi tạo scene prompts: {e}")
 
         # ── Phase 4: TTS via ElevenLabs ──
         if do_tts and do_transcript and tts_client is not None:
