@@ -328,29 +328,30 @@ def rewrite_transcript_viral(vi_transcript, frame_paths, product_info,
 
     info = (product_info or "").strip() or "(không có thông tin bổ sung)"
 
-    prompt = f"""Bạn là chuyên gia copywriter viral cho TikTok/Reels/Shorts.
+    prompt = f"""Bạn là chuyên gia copywriter viral cho TikTok/Reels/Shorts (thị trường Việt Nam).
 
-Dưới đây là transcript tiếng Việt của một video sản phẩm và các ảnh chụp sản phẩm trích từ chính video đó.
+Dưới đây là transcript của một video sản phẩm (có thể bằng tiếng Việt, tiếng Anh, hoặc trộn nhiều ngôn ngữ) và các ảnh chụp sản phẩm trích từ chính video đó.
 
 THÔNG TIN SẢN PHẨM (do người dùng cung cấp):
 {info}
 
-TRANSCRIPT GỐC (TIẾNG VIỆT):
+TRANSCRIPT GỐC (giữ nguyên ngôn ngữ — có thể không phải tiếng Việt):
 {vi_transcript.strip()}
 
 YÊU CẦU:
-1. Viết lại thành KỊCH BẢN VIRAL khoảng 60-90 giây cho TikTok / Reels / Shorts.
-2. 3-5 giây ĐẦU phải có HOOK CỰC MẠNH: câu hỏi gây tò mò, con số shock, hoặc vấn đề đau đầu của khách hàng.
-3. Highlight 2-3 USP của sản phẩm dựa trên những gì BẠN THẤY trong ảnh (màu sắc, thiết kế, công dụng, chi tiết nổi bật...).
-4. Văn phong nói chuyện tự nhiên kiểu người Việt trẻ. Tránh từ Hán-Việt nặng nề và lối viết sáo rỗng.
-5. CTA cuối rõ ràng: "comment", "follow", "click link bio", "mua ngay"...
-6. CHỈ in ra phần script thuần text — KHÔNG thêm lời giải thích, tiêu đề, markdown hay liệt kê đánh số.
-7. Output sẵn sàng để đọc trực tiếp bằng TTS."""
+1. Viết lại thành KỊCH BẢN VIRAL khoảng 60-90 giây cho TikTok / Reels / Shorts, BẰNG TIẾNG VIỆT.
+2. Nếu transcript gốc không phải tiếng Việt, tự hiểu nội dung và Việt hóa — không cần giữ nguyên cấu trúc câu gốc.
+3. 3-5 giây ĐẦU phải có HOOK CỰC MẠNH: câu hỏi gây tò mò, con số shock, hoặc vấn đề đau đầu của khách hàng.
+4. Highlight 2-3 USP của sản phẩm dựa trên những gì BẠN THẤY trong ảnh (màu sắc, thiết kế, công dụng, chi tiết nổi bật...).
+5. Văn phong nói chuyện tự nhiên kiểu người Việt trẻ. Tránh từ Hán-Việt nặng nề và lối viết sáo rỗng.
+6. CTA cuối rõ ràng: "comment", "follow", "click link bio", "mua ngay"...
+7. CHỈ in ra phần script thuần text TIẾNG VIỆT — KHÔNG thêm lời giải thích, tiêu đề, markdown hay liệt kê đánh số.
+8. Output sẵn sàng để đọc trực tiếp bằng TTS."""
 
     cmd = [codex_exe, "exec"]
     for fp in frame_paths:
         cmd.extend(["-i", fp])
-    cmd.append(prompt)
+    # Prompt qua stdin để tránh `-i <FILE>...` variadic nuốt mất prompt.
 
     if log_fn:
         log_fn(f"Gọi Codex CLI với {len(frame_paths)} ảnh tham chiếu...")
@@ -362,6 +363,7 @@ YÊU CẦU:
 
     result = subprocess.run(
         cmd,
+        input=prompt,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -377,6 +379,242 @@ YÊU CẦU:
         )
 
     return result.stdout.strip()
+
+
+def calc_reference_frame_count(viral_chars):
+    """Heuristic: more frames for longer scripts so Codex has enough visual context."""
+    if viral_chars < 600:
+        return 3
+    if viral_chars < 1200:
+        return 5
+    if viral_chars < 2000:
+        return 8
+    if viral_chars < 3000:
+        return 10
+    return 12
+
+
+SCENE_OUTPUT_FILES = [
+    "character_bible.txt",
+    "visual_bible.txt",
+    "story_breakdown.txt",
+    "all_image_prompts.txt",
+    "all_grok_video_prompts.txt",
+    "all_veo3_video_prompts.txt",
+    "production_notes.txt",
+]
+
+
+def generate_scene_prompts(viral_script, frame_paths, product_info,
+                           log_fn=None, timeout=1200):
+    """Use Codex CLI to produce a full scene breakdown + image/video prompts.
+
+    Output is one big string with `===FILE: <name>===` markers separating each
+    target file. Caller is responsible for splitting and writing to disk.
+    """
+    codex_exe = shutil.which("codex") or shutil.which("codex.cmd")
+    if not codex_exe:
+        raise RuntimeError("Không tìm thấy lệnh 'codex' trong PATH. Cài Codex CLI rồi thử lại.")
+
+    info = (product_info or "").strip() or "(không có thông tin bổ sung)"
+    files_list = ", ".join(SCENE_OUTPUT_FILES)
+
+    prompt = f"""Bạn là trợ lý sản xuất video dài bằng AI, chuyên phân tích kịch bản, chia cảnh, tạo prompt ảnh ChatGPT Image và tạo prompt video Grok + Veo 3 từ các ảnh keyframe.
+
+Bạn nhận: (a) một kịch bản viral tiếng Việt, (b) các ảnh keyframe trích từ video sản phẩm gốc đính kèm, (c) thông tin sản phẩm.
+
+NGUYÊN TẮC CHIA CẢNH:
+- KHÔNG chia số cố định. Phân tích nhịp kể chuyện, lời thoại, sự thay đổi của hành động/bối cảnh/cảm xúc.
+- Mỗi cảnh có 1 ý chính duy nhất.
+- Tạo cảnh mới khi: nhân vật chuyển hành động, bối cảnh đổi, cảm xúc đổi rõ, có câu thoại mới, hoặc cần điểm nhấn.
+- Không chia quá nhỏ nếu hành động liên tục; không gộp quá nhiều ý vì Grok/Veo3 khó render chuyển động rõ.
+
+QUY TẮC OUTPUT (CỰC KỲ QUAN TRỌNG):
+- Output chia thành nhiều block. Mỗi block bắt đầu bằng dòng marker đúng định dạng: `===FILE: <tên_file>===`
+- Đúng các tên file sau (theo thứ tự): {files_list}
+- Sau marker là nội dung file (text thuần, KHÔNG markdown bao quanh, KHÔNG dấu ```).
+- KHÔNG thêm lời giải thích bên ngoài các block.
+- Nếu thiếu thông tin, TỰ ĐƯA RA GIẢ ĐỊNH HỢP LÝ rồi tiếp tục — KHÔNG được hỏi lại (chế độ non-interactive).
+
+═══════════════════════════════════════════════
+NỘI DUNG TỪNG FILE
+═══════════════════════════════════════════════
+
+[character_bible.txt]
+Với mỗi nhân vật (nếu có): Tên | Tuổi | Giới tính | Ngoại hình | Kiểu tóc | Trang phục | Tính cách | Biểu cảm điển hình | Quy tắc giữ đồng nhất xuyên suốt video.
+Nếu video không có nhân vật người (chỉ sản phẩm), ghi rõ "Không có nhân vật người" và mô tả "nhân vật chính" là sản phẩm.
+
+[visual_bible.txt]
+Phong cách hình ảnh | Tỷ lệ khung (9:16 / 16:9 / 1:1) | Tông màu | Ánh sáng | Bối cảnh chính | Camera style | Mức realistic/cartoon/3D/cinematic | Những điều TUYỆT ĐỐI không thay đổi xuyên video.
+
+[story_breakdown.txt]
+PHẦN A — PHÂN TÍCH KỊCH BẢN (trả lời 12 câu, mỗi câu 1 dòng):
+1. Chủ đề chính:
+2. Đối tượng người xem:
+3. Phong cách phù hợp:
+4. Nhân vật chính/phụ:
+5. Bối cảnh chính:
+6. Mạch nội dung:
+7. Cảm xúc cần tạo:
+8. Có cần voiceover không:
+9. Có cần subtitle không:
+10. Video nên dài bao lâu:
+11. Số cảnh đề xuất:
+12. Vì sao chia số cảnh như vậy:
+
+PHẦN B — BẢNG CẢNH (mỗi cảnh 1 block, ngăn cách bằng dòng `---`):
+Cảnh <số>:
+- Thời lượng: <X giây>
+- Nội dung chính: <...>
+- Hành động nhân vật: <...>
+- Bối cảnh: <...>
+- Góc máy: <...>
+- Voiceover/Lời thoại: <...>
+- Ghi chú chuyển cảnh: <...>
+
+[all_image_prompts.txt]
+Mỗi cảnh = 1 prompt. Theo đúng cấu trúc:
+
+Image Prompt 01:
+Create a [style] [aspect ratio] keyframe image for a long-form AI video.
+Keep the same characters throughout the entire series:
+[short character description theo Character Bible]
+Scene 01:
+[describe the scene clearly]
+Show [main action, emotion, composition].
+Use [lighting, color tone, camera angle].
+No text, no subtitles, no letters, no watermark, no logo.
+
+(Lặp lại cho từng cảnh, đánh số 01, 02, 03...)
+
+[all_grok_video_prompts.txt]
+Nếu có N ảnh, tạo N-1 prompt (mỗi cặp ảnh liên tiếp). Cộng thêm Outro Prompt nếu cần.
+
+Grok Video Prompt 01 — Image 01 to Image 02:
+
+Use the uploaded Image 01 as the exact starting frame and Image 02 as the exact ending frame.
+Create a smooth [duration]-second video transition from Image 01 to Image 02.
+
+Preserve the same characters exactly:
+[character consistency rules]
+
+At 0-1s:
+[describe starting action]
+
+From 1-[middle time]s:
+[describe natural movement]
+
+From [middle time]-[end time]s:
+Smoothly arrive at the exact composition of Image 02.
+
+Voiceover:
+[voiceover text tiếng Việt]
+
+Voice accent:
+Vietnamese [Northern/Southern/Central] accent, warm, clear, natural.
+
+Camera motion:
+[gentle / cinematic / stable / handheld / slow zoom]
+
+Important restrictions:
+Do not change the characters' faces.
+Do not change hairstyles or outfits.
+Do not add text, subtitles, watermark, logo, random objects, or new people.
+
+[all_veo3_video_prompts.txt]
+Cùng N-1 prompt nhưng dùng cú pháp Veo 3:
+
+Veo 3 Video Prompt 01 — Scene 01 to Scene 02:
+Duration: 8 seconds
+Starting frame: Image 01 (exact composition)
+Ending frame: Image 02 (exact composition)
+Subject: [character/product description, giữ đồng nhất]
+Action timeline:
+- 0-2s: [opening motion]
+- 2-6s: [main movement]
+- 6-8s: [resolve to ending frame]
+Camera: [shot type, movement — e.g., slow dolly in, static medium shot]
+Lighting: [theo Visual Bible]
+Audio:
+- Voiceover (vi-VN, [Northern/Southern/Central] accent, [tone]): "[lời thoại]"
+- Ambient: [sound design hint]
+Style: [cinematic / commercial / realistic / cinematic 3D]
+Negative: no text overlay, no watermark, no logo, no extra people, no face/outfit changes.
+
+[production_notes.txt]
+Ghi chú sản xuất tổng thể: lưu ý kỹ thuật khi render, gợi ý nhạc nền, các điểm cần A/B test, cảnh có rủi ro AI render khó, gợi ý điều chỉnh cho từng nền tảng (TikTok/Reels/Shorts).
+
+═══════════════════════════════════════════════
+DỮ LIỆU ĐẦU VÀO
+═══════════════════════════════════════════════
+
+THÔNG TIN SẢN PHẨM:
+{info}
+
+KỊCH BẢN VIRAL TIẾNG VIỆT:
+{viral_script.strip()}
+
+═══════════════════════════════════════════════
+Bắt đầu output ngay (block đầu tiên `===FILE: character_bible.txt===`). KHÔNG thêm lời mở đầu."""
+
+    cmd = [codex_exe, "exec"]
+    for fp in frame_paths:
+        cmd.extend(["-i", fp])
+    # Prompt qua stdin để tránh `-i <FILE>...` variadic nuốt mất prompt.
+
+    if log_fn:
+        log_fn(f"Gọi Codex CLI cho scene breakdown ({len(frame_paths)} ảnh, có thể mất 3-10 phút)...")
+
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    result = subprocess.run(
+        cmd, input=prompt,
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        timeout=timeout, startupinfo=startupinfo,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Codex CLI thất bại (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout)[:500]}"
+        )
+    return result.stdout
+
+
+def split_scene_output(raw_output, scenes_dir):
+    """Split Codex output by `===FILE: <name>===` markers and write each section.
+
+    Always writes the raw output to `_raw_codex_output.txt` for debugging.
+    Returns the list of file paths actually written (besides the raw dump).
+    """
+    os.makedirs(scenes_dir, exist_ok=True)
+    raw_path = os.path.join(scenes_dir, "_raw_codex_output.txt")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        f.write(raw_output)
+
+    pattern = re.compile(r"^={3,}\s*FILE:\s*(\S+?)\s*={3,}\s*$", re.MULTILINE)
+    matches = list(pattern.finditer(raw_output))
+    if not matches:
+        return []
+
+    written = []
+    for i, m in enumerate(matches):
+        fname = m.group(1).strip().strip(".")
+        if not fname:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_output)
+        content = raw_output[start:end].strip()
+        # Sanitize file name to avoid path traversal
+        fname = os.path.basename(fname)
+        fpath = os.path.join(scenes_dir, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content + "\n")
+        written.append(fpath)
+    return written
 
 
 def translate_text(text, target_lang, log_fn=None):
@@ -441,6 +679,7 @@ class App(ctk.CTk):
         self.do_translate_var = ctk.BooleanVar(value=False)
         self.translate_var = ctk.StringVar(value=LANGUAGES["vi"])
         self.do_viral_rewrite_var = ctk.BooleanVar(value=False)
+        self.do_scene_prompts_var = ctk.BooleanVar(value=False)
 
         # ElevenLabs TTS
         self.do_tts_var = ctk.BooleanVar(value=False)
@@ -559,6 +798,10 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(0, 16))
         ctk.CTkCheckBox(
             opts_inner, text="🔥  Viết lại viral (Codex)", variable=self.do_viral_rewrite_var,
+            font=ctk.CTkFont(size=13),
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkCheckBox(
+            opts_inner, text="🎬  Tạo scene prompts (Image + Grok/Veo3)", variable=self.do_scene_prompts_var,
             font=ctk.CTkFont(size=13),
         ).pack(side="left", padx=(0, 16))
         ctk.CTkCheckBox(
@@ -1045,6 +1288,7 @@ class App(ctk.CTk):
         do_transcript = self.do_transcript_var.get()
         do_translate = self.do_translate_var.get()
         do_viral_rewrite = self.do_viral_rewrite_var.get()
+        do_scene_prompts = self.do_scene_prompts_var.get()
         do_tts = self.do_tts_var.get()
 
         if not (do_extract or do_transcript):
@@ -1062,10 +1306,10 @@ class App(ctk.CTk):
             return
 
         if do_viral_rewrite:
-            if not (do_translate and do_transcript):
+            if not do_transcript:
                 messagebox.showerror(
                     "Lỗi",
-                    "Viết lại viral cần bật 'Trích xuất phiên âm' + 'Dịch phiên âm' (sang tiếng Việt).",
+                    "Viết lại viral cần bật 'Trích xuất phiên âm' để lấy nội dung gốc làm nguồn.",
                 )
                 return
             if not do_extract:
@@ -1083,8 +1327,22 @@ class App(ctk.CTk):
 
         viral_product_info = (
             self.viral_product_info_textbox.get("1.0", "end").strip()
-            if do_viral_rewrite else ""
+            if (do_viral_rewrite or do_scene_prompts) else ""
         )
+
+        if do_scene_prompts:
+            if not do_viral_rewrite:
+                messagebox.showerror(
+                    "Lỗi",
+                    "Tạo scene prompts cần bật 'Viết lại viral (Codex)' trước để có kịch bản nguồn.",
+                )
+                return
+            if not (shutil.which("codex") or shutil.which("codex.cmd")):
+                messagebox.showerror(
+                    "Lỗi",
+                    "Không tìm thấy lệnh 'codex' trong PATH. Cài Codex CLI rồi thử lại.",
+                )
+                return
 
         do_merge_video = self.do_merge_video_var.get()
         if do_merge_video and not do_tts:
@@ -1171,10 +1429,10 @@ class App(ctk.CTk):
                 messagebox.showerror("Lỗi", "Vui lòng chọn ngôn ngữ để dịch.")
                 return
 
-        if do_viral_rewrite and translate_lang != "vi":
+        if do_viral_rewrite and do_translate and translate_lang != "vi":
             messagebox.showerror(
                 "Lỗi",
-                "Viết lại viral hiện chỉ hỗ trợ tiếng Việt. Hãy chọn 'Tiếng Việt' ở mục 'Dịch sang'.",
+                "Viết lại viral chỉ xuất ra tiếng Việt. Nếu có bật dịch, hãy chọn 'Tiếng Việt' ở mục 'Dịch sang' (hoặc bỏ tick 'Dịch phiên âm' để Codex tự xử lý transcript gốc).",
             )
             return
 
@@ -1195,7 +1453,7 @@ class App(ctk.CTk):
             target=self._batch_worker,
             args=(videos, videos_dir, output_root, interval, translate_lang,
                   do_extract, do_transcript, do_translate,
-                  do_viral_rewrite, viral_product_info,
+                  do_viral_rewrite, viral_product_info, do_scene_prompts,
                   do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                   tts_sync, tts_max_tempo, do_merge_video),
             daemon=True,
@@ -1221,7 +1479,7 @@ class App(ctk.CTk):
 
     def _batch_worker(self, videos, videos_dir, output_root, interval, translate_lang,
                       do_extract, do_transcript, do_translate,
-                      do_viral_rewrite, viral_product_info,
+                      do_viral_rewrite, viral_product_info, do_scene_prompts,
                       do_tts, tts_api_key, tts_voice_id, tts_voice_name, tts_model, tts_settings,
                       tts_sync, tts_max_tempo, do_merge_video):
         """Process every video in the folder sequentially."""
@@ -1300,6 +1558,7 @@ class App(ctk.CTk):
                         do_translate=do_translate,
                         do_viral_rewrite=do_viral_rewrite,
                         viral_product_info=viral_product_info,
+                        do_scene_prompts=do_scene_prompts,
                         whisper_model=whisper_model,
                         do_tts=do_tts,
                         tts_client=tts_client,
@@ -1334,7 +1593,7 @@ class App(ctk.CTk):
 
     def _process_single_video(self, video_path, output_dir, interval, translate_lang,
                               do_extract, do_transcript, do_translate,
-                              do_viral_rewrite, viral_product_info,
+                              do_viral_rewrite, viral_product_info, do_scene_prompts,
                               whisper_model,
                               do_tts, tts_client, tts_voice_id, tts_model, tts_settings,
                               tts_sync, tts_max_tempo,
@@ -1513,22 +1772,28 @@ class App(ctk.CTk):
             tts_source_label = f"dịch ({lang_name})"
             tts_source_segments = translated_segments
 
-        # ── Phase 3.5: Viral rewrite via Codex CLI (sau dịch sang tiếng Việt) ──
-        if do_viral_rewrite and do_translate and translate_lang == "vi" and translated_full:
+        # ── Phase 3.5: Viral rewrite via Codex CLI ──
+        # Ưu tiên bản dịch tiếng Việt nếu có; nếu không, dùng thẳng transcript gốc
+        # (Codex sẽ tự viết lại sang tiếng Việt dù gốc là tiếng Anh / hội thoại trộn).
+        viral_script = None
+        if do_viral_rewrite and do_transcript and full_text:
+            source_text = translated_full if (translated_full) else full_text
+            source_label = "bản dịch (vi)" if translated_full else "transcript gốc"
+
             if self._cancel_flag.is_set():
                 raise RuntimeError("Đã hủy bởi người dùng.")
 
-            self._log("Đang chọn ảnh tham chiếu cho Codex...")
-            frame_paths = pick_representative_frames(output_dir, n=5)
-            if not frame_paths:
+            self._log(f"Đang chọn ảnh tham chiếu cho Codex (nguồn: {source_label})...")
+            viral_frames = pick_representative_frames(output_dir, n=5)
+            if not viral_frames:
                 self._log("⚠ Không tìm thấy ảnh frame để gửi Codex — bỏ qua viết lại viral.")
             else:
-                self._log(f"Đã chọn {len(frame_paths)} ảnh: {[Path(p).name for p in frame_paths]}")
+                self._log(f"Đã chọn {len(viral_frames)} ảnh: {[Path(p).name for p in viral_frames]}")
                 progress_cb(w_frame + w_transcript + w_translate, "Đang viết lại viral bằng Codex CLI...")
                 try:
                     viral_script = rewrite_transcript_viral(
-                        vi_transcript=translated_full,
-                        frame_paths=frame_paths,
+                        vi_transcript=source_text,
+                        frame_paths=viral_frames,
                         product_info=viral_product_info,
                         log_fn=self._log,
                     )
@@ -1540,7 +1805,39 @@ class App(ctk.CTk):
                     tts_source_label = "viral (Codex)"
                     tts_source_segments = []  # viral script không có timestamp gốc
                 except Exception as e:
-                    self._log(f"✖ Lỗi viết lại viral: {e} — giữ nguyên bản dịch cho TTS.")
+                    self._log(f"✖ Lỗi viết lại viral: {e} — giữ nguyên nguồn cho TTS.")
+                    viral_script = None
+
+        # ── Phase 3.7: Scene breakdown + image/video prompts via Codex CLI ──
+        if do_scene_prompts and viral_script:
+            if self._cancel_flag.is_set():
+                raise RuntimeError("Đã hủy bởi người dùng.")
+
+            n_frames = calc_reference_frame_count(len(viral_script))
+            self._log(f"Đang chọn {n_frames} ảnh tham chiếu cho scene breakdown...")
+            scene_frames = pick_representative_frames(output_dir, n=n_frames)
+            if not scene_frames:
+                self._log("⚠ Không có ảnh để tạo scene prompts — bỏ qua.")
+            else:
+                self._log(f"Đã chọn {len(scene_frames)} ảnh: {[Path(p).name for p in scene_frames]}")
+                progress_cb(w_frame + w_transcript + w_translate, "Đang tạo scene prompts bằng Codex (3-10 phút)...")
+                try:
+                    raw = generate_scene_prompts(
+                        viral_script=viral_script,
+                        frame_paths=scene_frames,
+                        product_info=viral_product_info,
+                        log_fn=self._log,
+                    )
+                    scenes_dir = os.path.join(output_dir, "scene_prompts")
+                    written = split_scene_output(raw, scenes_dir)
+                    if written:
+                        self._log(f"Đã lưu {len(written)} file scene prompts vào: scene_prompts/")
+                        for p in written:
+                            self._log(f"  • {Path(p).name}")
+                    else:
+                        self._log("⚠ Codex output không có marker `===FILE: ...===` — chỉ lưu _raw_codex_output.txt.")
+                except Exception as e:
+                    self._log(f"✖ Lỗi tạo scene prompts: {e}")
 
         # ── Phase 4: TTS via ElevenLabs ──
         if do_tts and do_transcript and tts_client is not None:
